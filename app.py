@@ -1,11 +1,11 @@
-import hashlib, hmac, os, secrets, sqlite3, time
+import hashlib, hmac, json, os, secrets, sqlite3, time
+from urllib.parse import parse_qsl
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "")
 DB_PATH = os.getenv("DB_PATH", "quest.db")
 
 app = FastAPI(title="Belgrade Quest")
@@ -32,6 +32,9 @@ def init():
         CREATE TABLE IF NOT EXISTS slots(
           id INTEGER PRIMARY KEY, flat_id INTEGER NOT NULL REFERENCES flats(id) ON DELETE CASCADE,
           date TEXT NOT NULL, time TEXT DEFAULT '', title TEXT NOT NULL, description TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS rsvp(
+          slot_id INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id), PRIMARY KEY(slot_id,user_id));
         CREATE TABLE IF NOT EXISTS proposals(
           id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
           title TEXT NOT NULL, description TEXT DEFAULT '', people TEXT DEFAULT '',
@@ -80,25 +83,30 @@ def login_user(resp: Response, tg_id: str, name: str):
 
 @app.get("/api/config")
 def config():
-    return {"bot_username": BOT_USERNAME, "dev_login": not BOT_TOKEN}
+    return {"dev_login": not BOT_TOKEN}
 
 
-@app.get("/auth/telegram")
-def tg_callback(request: Request):
-    d = dict(request.query_params)
-    h = d.pop("hash", "")
+class TgLogin(BaseModel):
+    init_data: str
+
+
+@app.post("/api/login/tg")
+def tg_login(b: TgLogin, resp: Response):
+    """Вход Telegram Mini App: проверяем подпись initData по токену бота."""
     if not BOT_TOKEN:
         raise HTTPException(400, "BOT_TOKEN не задан")
+    d = dict(parse_qsl(b.init_data, keep_blank_values=True))
+    h = d.pop("hash", "")
     check = "\n".join(f"{k}={d[k]}" for k in sorted(d))
-    key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+    key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
     if not hmac.compare_digest(hmac.new(key, check.encode(), hashlib.sha256).hexdigest(), h):
         raise HTTPException(403, "Подпись Telegram не сошлась")
     if time.time() - int(d.get("auth_date", 0)) > 86400:
-        raise HTTPException(403, "Вход устарел")
-    name = (d.get("first_name", "") + " " + d.get("last_name", "")).strip() or d.get("username", "Участник")
-    resp = RedirectResponse("/")
-    login_user(resp, d["id"], name)
-    return resp
+        raise HTTPException(403, "Вход устарел, откройте приложение заново")
+    tu = json.loads(d.get("user", "{}"))
+    name = (tu.get("first_name", "") + " " + tu.get("last_name", "")).strip() or tu.get("username", "Участник")
+    login_user(resp, str(tu["id"]), name)
+    return {"ok": True}
 
 
 class DevLogin(BaseModel):
@@ -188,9 +196,22 @@ class Slot(BaseModel):
 def schedule(u=Depends(me)):
     with db() as c:
         return [dict(r) for r in c.execute(
-            """SELECT s.*, f.name AS flat, f.address, h.name AS host FROM slots s
+            """SELECT s.*, f.name AS flat, f.address, h.name AS host,
+               (SELECT COUNT(*) FROM rsvp r WHERE r.slot_id=s.id) AS going,
+               EXISTS(SELECT 1 FROM rsvp r WHERE r.slot_id=s.id AND r.user_id=%d) AS me_going
+               FROM slots s
                JOIN flats f ON f.id=s.flat_id LEFT JOIN users h ON h.id=f.host_id
-               ORDER BY s.date, s.time""")]
+               ORDER BY s.date, s.time""" % u["id"])]
+
+
+@app.post("/api/slots/{sid}/rsvp")
+def rsvp(sid: int, u=Depends(me)):
+    with db() as c:
+        if c.execute("SELECT 1 FROM rsvp WHERE slot_id=? AND user_id=?", (sid, u["id"])).fetchone():
+            c.execute("DELETE FROM rsvp WHERE slot_id=? AND user_id=?", (sid, u["id"]))
+            return {"going": False}
+        c.execute("INSERT INTO rsvp VALUES(?,?)", (sid, u["id"]))
+    return {"going": True}
 
 
 @app.post("/api/slots")
