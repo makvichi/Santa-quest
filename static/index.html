@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Белградская бродилка</title>
+<style>
+:root{--bg:#14121a;--card:#1f1b29;--fg:#ece8f5;--mut:#9a93ad;--ac:#e8b04a;--ok:#6fcf97;--bad:#eb5757}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.45 system-ui,sans-serif}
+main{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:22px;margin:8px 0}h2{font-size:18px;margin:20px 0 8px;color:var(--ac)}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}
+button,input,textarea,select{font:inherit;color:inherit}
+button{background:var(--ac);color:#1a1405;border:0;border-radius:8px;padding:8px 14px;cursor:pointer}
+button.ghost{background:transparent;color:var(--fg);border:1px solid #3a3450}
+button.on{background:var(--ac);color:#1a1405}
+input,textarea,select{width:100%;background:#15121d;border:1px solid #3a3450;border-radius:8px;padding:8px;margin:4px 0}
+.card{background:var(--card);border-radius:12px;padding:12px;margin:8px 0}
+.mut{color:var(--mut);font-size:14px}.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}
+.tag{font-size:12px;padding:2px 8px;border-radius:99px;background:#3a3450}
+.accepted{background:var(--ok);color:#06220f}.rejected{background:var(--bad);color:#2a0606}
+.hidden{display:none}
+</style></head><body><main>
+<h1>🏙 Белградская бродилка</h1>
+<div id="app"></div>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function api(path,method='GET',body){
+  const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined});
+  if(r.status===401)throw 401;
+  if(!r.ok){alert((await r.json().catch(()=>({}))).detail||'Ошибка');throw r.status}
+  return r.json();
+}
+let tab='schedule',U=null;
+async function boot(){
+  try{U=await api('/api/me')}catch(e){return loginView()}
+  render();
+}
+async function loginView(){
+  const c=await (await fetch('/api/config')).json();
+  $('#app').innerHTML=`<div class="card"><p>Зарегистрируйся, чтобы видеть расписание квартир и подавать заявки на активности.</p>
+  <div id="tg"></div>
+  ${c.dev_login?`<p class="mut">Тестовый вход (пока не подключён Telegram-бот):</p>
+  <input id="dn" placeholder="Твоё имя"><button onclick="dev()">Войти</button>`:''}</div>`;
+  if(c.bot_username){
+    const s=document.createElement('script');s.async=true;
+    s.src='https://telegram.org/js/telegram-widget.js?22';
+    s.dataset.telegramLogin=c.bot_username;s.dataset.size='large';
+    s.dataset.authUrl='/auth/telegram';s.dataset.requestAccess='write';
+    $('#tg').appendChild(s);
+  }
+}
+async function dev(){await api('/api/login/dev','POST',{name:$('#dn').value});boot()}
+async function logout(){await api('/api/logout','POST');U=null;loginView()}
+const tabs={schedule:'Расписание',proposals:'Заявки',people:'Участники',me:'Профиль'};
+function render(){
+  const t=Object.entries(tabs).map(([k,v])=>`<button class="${k===tab?'on':'ghost'}" onclick="go('${k}')">${v}</button>`).join('');
+  $('#app').innerHTML=`<div class="mut">Привет, ${esc(U.name)}${U.is_admin?' · организатор':''}</div><nav>${t}</nav><div id="view"></div>`;
+  ({schedule,proposals,people,me})[tab]();
+}
+function go(t){tab=t;render()}
+async function schedule(){
+  const [sl,fl]=await Promise.all([api('/api/schedule'),api('/api/flats')]);
+  let h='<h2>Расписание</h2>';
+  let last='';
+  for(const s of sl){
+    if(s.date!==last){h+=`<h3>${esc(s.date)}</h3>`;last=s.date}
+    h+=`<div class="card"><b>${esc(s.time)} ${esc(s.title)}</b><div class="mut">${esc(s.flat)} · ${esc(s.address)}${s.host?' · хозяин: '+esc(s.host):''}</div>
+    <div>${esc(s.description)}</div>${U.is_admin?`<button class="ghost" onclick="del('/api/slots/${s.id}')">Удалить</button>`:''}</div>`;
+  }
+  if(!sl.length)h+='<p class="mut">Пока пусто.</p>';
+  h+='<h2>Квартиры</h2>'+fl.map(f=>`<div class="card"><b>${esc(f.name)}</b> <span class="mut">${esc(f.address)} ${f.host?'· '+esc(f.host):''}</span>
+  ${U.is_admin?`<button class="ghost" onclick="del('/api/flats/${f.id}')">Удалить</button>`:''}</div>`).join('');
+  if(U.is_admin){
+    const ps=await api('/api/participants');
+    h+=`<h2>Добавить квартиру</h2><div class="card"><input id="fn" placeholder="Название"><input id="fa" placeholder="Адрес">
+    <select id="fh"><option value="">Хозяин не выбран</option>${ps.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
+    <button onclick="addFlat()">Добавить</button></div>
+    <h2>Добавить слот</h2><div class="card"><select id="sf">${fl.map(f=>`<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select>
+    <div class="row"><input id="sd" type="date"><input id="st" type="time"></div><input id="stt" placeholder="Название">
+    <textarea id="sdd" placeholder="Описание"></textarea><button onclick="addSlot()">Добавить</button></div>`;
+  }
+  $('#view').innerHTML=h;
+}
+async function del(u){if(confirm('Удалить?')){await api(u,'DELETE');render()}}
+async function addFlat(){await api('/api/flats','POST',{name:$('#fn').value,address:$('#fa').value,host_id:$('#fh').value?+$('#fh').value:null});render()}
+async function addSlot(){await api('/api/slots','POST',{flat_id:+$('#sf').value,date:$('#sd').value,time:$('#st').value,title:$('#stt').value,description:$('#sdd').value});render()}
+async function proposals(){
+  const ps=await api('/api/proposals');
+  let h=`<h2>Заявки на активности</h2><div class="card"><input id="pt" placeholder="Название активности"><textarea id="pd" placeholder="Что будет происходить"></textarea>
+  <input id="pp" placeholder="Сколько людей нужно"><input id="pw" placeholder="Желаемые дата/квартира"><button onclick="addProp()">Подать заявку</button></div>`;
+  h+=ps.map(p=>`<div class="card"><b>${esc(p.title)}</b> <span class="tag ${p.status}">${{new:'новая',accepted:'принята',rejected:'отклонена'}[p.status]}</span>
+  <div class="mut">${esc(p.author)}${p.people?' · людей: '+esc(p.people):''}${p.wish?' · '+esc(p.wish):''}</div><div>${esc(p.description)}</div>
+  <div class="row">${U.is_admin?`<button class="ghost" onclick="st(${p.id},'accepted')">Принять</button><button class="ghost" onclick="st(${p.id},'rejected')">Отклонить</button>`:''}
+  ${(U.is_admin||p.user_id===U.id)?`<button class="ghost" onclick="del('/api/proposals/${p.id}')">Удалить</button>`:''}</div></div>`).join('');
+  $('#view').innerHTML=h;
+}
+async function addProp(){await api('/api/proposals','POST',{title:$('#pt').value,description:$('#pd').value,people:$('#pp').value,wish:$('#pw').value});render()}
+async function st(id,status){await api('/api/proposals/'+id,'PATCH',{status});render()}
+async function people(){
+  const ps=await api('/api/participants');
+  $('#view').innerHTML='<h2>Участники ('+ps.length+')</h2>'+ps.map(p=>`<div class="card"><b>${esc(p.name)}</b>${p.nick?' «'+esc(p.nick)+'»':''}<div class="mut">${esc(p.role)}</div></div>`).join('');
+}
+function me(){
+  $('#view').innerHTML=`<h2>Профиль</h2><div class="card"><input id="mn" value="${esc(U.name)}" placeholder="Имя"><input id="mk" value="${esc(U.nick)}" placeholder="Ник в мире бродилки">
+  <input id="mr" value="${esc(U.role)}" placeholder="Роль / фракция"><div class="row"><button onclick="saveMe()">Сохранить</button><button class="ghost" onclick="logout()">Выйти</button></div></div>`;
+}
+async function saveMe(){await api('/api/me','PUT',{name:$('#mn').value,nick:$('#mk').value,role:$('#mr').value});U=await api('/api/me');render()}
+boot();
+</script></body></html>
